@@ -1,0 +1,65 @@
+syntax = "proto3";
+
+package filevault.node.v1;
+
+option csharp_namespace = "FileVault.Agent.Node.Protos";
+
+service FileVaultNode {
+  rpc Upload(stream UploadMessage) returns (UploadResult);
+  rpc Download(DownloadRequest) returns (stream ChunkData);
+  rpc Delete(DeleteRequest) returns (DeleteResult);
+  rpc GetHealth(HealthRequest) returns (NodeStatus);
+}
+
+// First message in Upload stream
+message UploadRequest {
+  string objectId = 1;
+  string createdAtUtc = 2;       // ISO-8601: "yyyy-MM-ddTHH:mm:ss.fffffffZ"
+  string contentType = 3;         // optional
+  string originalFilename = 4;    // optional
+  int64 expectedSizeBytes = 5;    // optional
+}
+
+// Subsequent messages in Upload stream
+message ChunkData {
+  bytes data = 1;
+}
+
+// Wrapper for streaming upload
+message UploadMessage {
+  oneof message {
+    UploadRequest request = 1;
+    ChunkData chunk = 2;
+  }
+}
+
+message DownloadRequest {
+  string objectId = 1;
+  string finalPath = 2;  // optional, if not provided compute from objectId
+}
+
+message DeleteRequest {
+  string objectId = 1;
+  string finalPath = 2;  // optional, if not provided compute from objectId
+}
+
+message UploadResult {
+  bool success = 1;
+  string errorMessage = 2;
+  string finalPath = 3;     // relative path from basePath
+  int64 sizeBytes = 4;
+  string checksum = 5;      // SHA-256 hex string
+}
+
+message DeleteResult {
+  bool deleted = 1;
+}
+
+message HealthRequest {}
+
+message NodeStatus {
+  string nodeId = 1;
+  bool isAlive = 2;
+  int64 dataPathFreeBytes = 3;
+  int64 dataPathTotalBytes = 4;
+}
