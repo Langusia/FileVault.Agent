@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using FileVault.Agent.Node.Protos;
+using Grpc.Core;
 using Grpc.Net.Client;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Xunit;
@@ -58,6 +59,7 @@ public class NodeServiceIntegrationTests : IClassFixture<WebApplicationFactory<P
         Assert.Equal(testData.Length, uploadResult.SizeBytes);
         Assert.Equal(expectedChecksum, uploadResult.Checksum);
         Assert.False(string.IsNullOrEmpty(uploadResult.FinalPath));
+        Assert.EndsWith(".txt", uploadResult.FinalPath); // Verify extension preserved
 
         // Act - Download
         var downloadCall = _client.Download(new DownloadRequest { ObjectId = objectId });
@@ -71,6 +73,54 @@ public class NodeServiceIntegrationTests : IClassFixture<WebApplicationFactory<P
         // Assert - Download
         Assert.Equal(testData, downloadedData.ToArray());
         Assert.Equal(expectedChecksum, ComputeSha256(downloadedData.ToArray()));
+    }
+
+    [Fact]
+    public async Task Upload_WithExtension_ExtensionPreserved()
+    {
+        // Arrange
+        var objectId = Guid.NewGuid().ToString();
+        var testData = new byte[] { 0x89, 0x50, 0x4E, 0x47 }; // Fake PNG header
+
+        // Act - Upload with .png extension
+        var uploadResult = await _client.UploadAsync(new UploadRequest
+        {
+            ObjectId = objectId,
+            CreatedAtUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ"),
+            ContentType = "image/png",
+            OriginalFilename = "test-image.png",
+            Data = Google.Protobuf.ByteString.CopyFrom(testData)
+        });
+
+        // Assert
+        Assert.True(uploadResult.Success);
+        Assert.EndsWith(".png", uploadResult.FinalPath);
+        Assert.Contains(objectId, uploadResult.FinalPath);
+
+        // Verify file actually exists with extension
+        var fullPath = Path.Combine(_testBasePath, uploadResult.FinalPath);
+        Assert.True(File.Exists(fullPath));
+        Assert.EndsWith(".png", fullPath);
+    }
+
+    [Fact]
+    public async Task Upload_WithoutOriginalFilename_NoExtension()
+    {
+        // Arrange
+        var objectId = Guid.NewGuid().ToString();
+        var testData = "Test data without extension"u8.ToArray();
+
+        // Act - Upload without originalFilename
+        var uploadResult = await _client.UploadAsync(new UploadRequest
+        {
+            ObjectId = objectId,
+            CreatedAtUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ"),
+            Data = Google.Protobuf.ByteString.CopyFrom(testData)
+        });
+
+        // Assert - Should succeed without extension
+        Assert.True(uploadResult.Success);
+        Assert.DoesNotContain(".", uploadResult.FinalPath.Split('/').Last());
     }
 
     [Fact]
@@ -119,6 +169,7 @@ public class NodeServiceIntegrationTests : IClassFixture<WebApplicationFactory<P
         {
             ObjectId = objectId,
             CreatedAtUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ"),
+            OriginalFilename = "document.pdf",
             Data = Google.Protobuf.ByteString.CopyFrom(testData1)
         });
 
@@ -130,6 +181,7 @@ public class NodeServiceIntegrationTests : IClassFixture<WebApplicationFactory<P
         {
             ObjectId = objectId,
             CreatedAtUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ"),
+            OriginalFilename = "document.pdf",
             Data = Google.Protobuf.ByteString.CopyFrom(testData2)
         });
 
@@ -139,6 +191,12 @@ public class NodeServiceIntegrationTests : IClassFixture<WebApplicationFactory<P
         // Assert - Different paths with versioning
         Assert.NotEqual(firstPath, secondPath);
         Assert.Contains("_1", secondPath);
+        // Verify both have .pdf extension
+        Assert.EndsWith(".pdf", firstPath);
+        Assert.EndsWith(".pdf", secondPath);
+        // Verify versioning pattern: objectId.pdf → objectId_1.pdf
+        Assert.Contains($"{objectId}.pdf", firstPath);
+        Assert.Contains($"{objectId}_1.pdf", secondPath);
 
         // Verify both files exist and have correct content
         var downloadCall1 = _client.Download(new DownloadRequest { FinalPath = firstPath });
