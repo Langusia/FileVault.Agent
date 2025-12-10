@@ -45,34 +45,14 @@ public class NodeServiceIntegrationTests : IClassFixture<WebApplicationFactory<P
         var expectedChecksum = ComputeSha256(testData);
 
         // Act - Upload
-        var uploadCall = _client.Upload();
-
-        // Send metadata
-        await uploadCall.RequestStream.WriteAsync(new UploadMessage
+        var uploadResult = await _client.UploadAsync(new UploadRequest
         {
-            Request = new UploadRequest
-            {
-                ObjectId = objectId,
-                CreatedAtUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ"),
-                ContentType = "text/plain",
-                OriginalFilename = "test.txt",
-                ExpectedSizeBytes = testData.Length
-            }
+            ObjectId = objectId,
+            CreatedAtUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ"),
+            ContentType = "text/plain",
+            OriginalFilename = "test.txt",
+            Data = Google.Protobuf.ByteString.CopyFrom(testData)
         });
-
-        // Send data in chunks
-        const int chunkSize = 16;
-        for (int i = 0; i < testData.Length; i += chunkSize)
-        {
-            var chunk = testData.AsMemory(i, Math.Min(chunkSize, testData.Length - i));
-            await uploadCall.RequestStream.WriteAsync(new UploadMessage
-            {
-                Chunk = new ChunkData { Data = Google.Protobuf.ByteString.CopyFrom(chunk.Span) }
-            });
-        }
-
-        await uploadCall.RequestStream.CompleteAsync();
-        var uploadResult = await uploadCall.ResponseAsync;
 
         // Assert - Upload
         Assert.True(uploadResult.Success);
@@ -102,21 +82,12 @@ public class NodeServiceIntegrationTests : IClassFixture<WebApplicationFactory<P
         var testData = "Test data for deletion"u8.ToArray();
 
         // Act - Upload
-        var uploadCall = _client.Upload();
-        await uploadCall.RequestStream.WriteAsync(new UploadMessage
+        var uploadResult = await _client.UploadAsync(new UploadRequest
         {
-            Request = new UploadRequest
-            {
-                ObjectId = objectId,
-                CreatedAtUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ")
-            }
+            ObjectId = objectId,
+            CreatedAtUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ"),
+            Data = Google.Protobuf.ByteString.CopyFrom(testData)
         });
-        await uploadCall.RequestStream.WriteAsync(new UploadMessage
-        {
-            Chunk = new ChunkData { Data = Google.Protobuf.ByteString.CopyFrom(testData) }
-        });
-        await uploadCall.RequestStream.CompleteAsync();
-        var uploadResult = await uploadCall.ResponseAsync;
 
         Assert.True(uploadResult.Success);
 
@@ -145,41 +116,23 @@ public class NodeServiceIntegrationTests : IClassFixture<WebApplicationFactory<P
         var testData2 = "Second version with different content"u8.ToArray();
 
         // Act - First Upload
-        var uploadCall1 = _client.Upload();
-        await uploadCall1.RequestStream.WriteAsync(new UploadMessage
+        var uploadResult1 = await _client.UploadAsync(new UploadRequest
         {
-            Request = new UploadRequest
-            {
-                ObjectId = objectId,
-                CreatedAtUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ")
-            }
+            ObjectId = objectId,
+            CreatedAtUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ"),
+            Data = Google.Protobuf.ByteString.CopyFrom(testData1)
         });
-        await uploadCall1.RequestStream.WriteAsync(new UploadMessage
-        {
-            Chunk = new ChunkData { Data = Google.Protobuf.ByteString.CopyFrom(testData1) }
-        });
-        await uploadCall1.RequestStream.CompleteAsync();
-        var uploadResult1 = await uploadCall1.ResponseAsync;
 
         Assert.True(uploadResult1.Success);
         var firstPath = uploadResult1.FinalPath;
 
         // Act - Second Upload (same objectId)
-        var uploadCall2 = _client.Upload();
-        await uploadCall2.RequestStream.WriteAsync(new UploadMessage
+        var uploadResult2 = await _client.UploadAsync(new UploadRequest
         {
-            Request = new UploadRequest
-            {
-                ObjectId = objectId,
-                CreatedAtUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ")
-            }
+            ObjectId = objectId,
+            CreatedAtUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ"),
+            Data = Google.Protobuf.ByteString.CopyFrom(testData2)
         });
-        await uploadCall2.RequestStream.WriteAsync(new UploadMessage
-        {
-            Chunk = new ChunkData { Data = Google.Protobuf.ByteString.CopyFrom(testData2) }
-        });
-        await uploadCall2.RequestStream.CompleteAsync();
-        var uploadResult2 = await uploadCall2.ResponseAsync;
 
         Assert.True(uploadResult2.Success);
         var secondPath = uploadResult2.FinalPath;
@@ -253,17 +206,12 @@ public class NodeServiceIntegrationTests : IClassFixture<WebApplicationFactory<P
         var objectId = Guid.NewGuid().ToString();
 
         // Act
-        var uploadCall = _client.Upload();
-        await uploadCall.RequestStream.WriteAsync(new UploadMessage
+        var uploadResult = await _client.UploadAsync(new UploadRequest
         {
-            Request = new UploadRequest
-            {
-                ObjectId = objectId,
-                CreatedAtUtc = "invalid-date-format"
-            }
+            ObjectId = objectId,
+            CreatedAtUtc = "invalid-date-format",
+            Data = Google.Protobuf.ByteString.CopyFrom("test"u8.ToArray())
         });
-        await uploadCall.RequestStream.CompleteAsync();
-        var uploadResult = await uploadCall.ResponseAsync;
 
         // Assert
         Assert.False(uploadResult.Success);
@@ -274,17 +222,12 @@ public class NodeServiceIntegrationTests : IClassFixture<WebApplicationFactory<P
     public async Task Upload_EmptyObjectId_ReturnsError()
     {
         // Act
-        var uploadCall = _client.Upload();
-        await uploadCall.RequestStream.WriteAsync(new UploadMessage
+        var uploadResult = await _client.UploadAsync(new UploadRequest
         {
-            Request = new UploadRequest
-            {
-                ObjectId = "",
-                CreatedAtUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ")
-            }
+            ObjectId = "",
+            CreatedAtUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ"),
+            Data = Google.Protobuf.ByteString.CopyFrom("test"u8.ToArray())
         });
-        await uploadCall.RequestStream.CompleteAsync();
-        var uploadResult = await uploadCall.ResponseAsync;
 
         // Assert
         Assert.False(uploadResult.Success);
@@ -322,24 +265,12 @@ public class NodeServiceIntegrationTests : IClassFixture<WebApplicationFactory<P
 
     private async Task<UploadResult> UploadDataAsync(string objectId, byte[] data)
     {
-        var uploadCall = _client.Upload();
-
-        await uploadCall.RequestStream.WriteAsync(new UploadMessage
+        return await _client.UploadAsync(new UploadRequest
         {
-            Request = new UploadRequest
-            {
-                ObjectId = objectId,
-                CreatedAtUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ")
-            }
+            ObjectId = objectId,
+            CreatedAtUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ"),
+            Data = Google.Protobuf.ByteString.CopyFrom(data)
         });
-
-        await uploadCall.RequestStream.WriteAsync(new UploadMessage
-        {
-            Chunk = new ChunkData { Data = Google.Protobuf.ByteString.CopyFrom(data) }
-        });
-
-        await uploadCall.RequestStream.CompleteAsync();
-        return await uploadCall.ResponseAsync;
     }
 
     private static string ComputeSha256(byte[] data)
