@@ -20,22 +20,24 @@ public class PathBuilder : IPathBuilder
         _tempDirectory = Path.Combine(_options.BasePath, _options.TempDirName);
     }
 
-    public string GetFinalPath(string objectId)
+    public string GetFinalPath(string objectId, string? extension = null)
     {
         if (string.IsNullOrWhiteSpace(objectId))
             throw new ArgumentException("ObjectId cannot be null or whitespace", nameof(objectId));
 
         var shardPath = ComputeShardPath(objectId);
-        return Path.Combine(_options.BasePath, shardPath, objectId);
+        var filename = BuildFilename(objectId, extension);
+        return Path.Combine(_options.BasePath, shardPath, filename);
     }
 
-    public string GetTempPath(string objectId)
+    public string GetTempPath(string objectId, string? extension = null)
     {
         if (string.IsNullOrWhiteSpace(objectId))
             throw new ArgumentException("ObjectId cannot be null or whitespace", nameof(objectId));
 
         var timestamp = DateTime.UtcNow.Ticks;
-        var tempFileName = $"{objectId}_{timestamp}.uploading";
+        var filename = BuildFilename(objectId, extension);
+        var tempFileName = $"{filename}_{timestamp}.uploading";
         return Path.Combine(_tempDirectory, tempFileName);
     }
 
@@ -47,13 +49,27 @@ public class PathBuilder : IPathBuilder
         return objectId;
     }
 
-    public string GetRelativePath(string objectId)
+    public string GetRelativePath(string objectId, string? extension = null)
     {
         if (string.IsNullOrWhiteSpace(objectId))
             throw new ArgumentException("ObjectId cannot be null or whitespace", nameof(objectId));
 
         var shardPath = ComputeShardPath(objectId);
-        return Path.Combine(shardPath, objectId);
+        var filename = BuildFilename(objectId, extension);
+        return Path.Combine(shardPath, filename);
+    }
+
+    /// <summary>
+    /// Builds a filename from objectId and optional extension
+    /// </summary>
+    private string BuildFilename(string objectId, string? extension)
+    {
+        if (string.IsNullOrWhiteSpace(extension))
+            return objectId;
+
+        // Ensure extension starts with a dot
+        var ext = extension.StartsWith('.') ? extension : $".{extension}";
+        return $"{objectId}{ext}";
     }
 
     /// <summary>

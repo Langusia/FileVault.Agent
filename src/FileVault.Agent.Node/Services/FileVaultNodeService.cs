@@ -87,16 +87,23 @@ public class FileVaultNodeService : FileVaultNode.FileVaultNodeBase
                 };
             }
 
+            // Extract file extension from original filename if provided
+            string? extension = null;
+            if (!string.IsNullOrWhiteSpace(request.OriginalFilename))
+            {
+                extension = Path.GetExtension(request.OriginalFilename);
+            }
+
             _logger.LogInformation(
-                "Starting upload for objectId: {ObjectId}, contentType: {ContentType}, originalFilename: {OriginalFilename}, size: {Size}",
-                objectId, request.ContentType, request.OriginalFilename, request.Data.Length);
+                "Starting upload for objectId: {ObjectId}, contentType: {ContentType}, originalFilename: {OriginalFilename}, extension: {Extension}, size: {Size}",
+                objectId, request.ContentType, request.OriginalFilename, extension, request.Data.Length);
 
             // Acquire per-object lock
             var lockKey = _pathBuilder.GetLockKey(objectId);
             keyLock = await _keyedLock.LockAsync(lockKey, context.CancellationToken);
 
-            // Get temp path
-            tempPath = _pathBuilder.GetTempPath(objectId);
+            // Get temp path with extension
+            tempPath = _pathBuilder.GetTempPath(objectId, extension);
 
             // Get data from request
             var data = request.Data.ToByteArray();
@@ -107,8 +114,8 @@ public class FileVaultNodeService : FileVaultNode.FileVaultNodeBase
             // Write to temp file
             await File.WriteAllBytesAsync(tempPath, data, context.CancellationToken);
 
-            // Get final path
-            var finalPath = _pathBuilder.GetFinalPath(objectId);
+            // Get final path with extension
+            var finalPath = _pathBuilder.GetFinalPath(objectId, extension);
 
             // Handle versioning if file exists
             if (await _fileStorage.ExistsAsync(finalPath, context.CancellationToken))
