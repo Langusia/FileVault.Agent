@@ -39,12 +39,11 @@ public class FileVaultNodeService : FileVaultNode.FileVaultNodeBase
     }
 
     public override async Task<UploadResult> Upload(
-        IAsyncStreamReader<UploadMessage> requestStream,
+        UploadRequest request,
         ServerCallContext context)
     {
         string? objectId = null;
         string? tempPath = null;
-        string? lockKey = null;
         IDisposable? keyLock = null;
 
         try
@@ -52,28 +51,7 @@ public class FileVaultNodeService : FileVaultNode.FileVaultNodeBase
             // Wait for upload slot
             await _uploadLimiter.WaitAsync(context.CancellationToken);
 
-            // Read first message (must be UploadRequest)
-            if (!await requestStream.MoveNext(context.CancellationToken))
-            {
-                return new UploadResult
-                {
-                    Success = false,
-                    ErrorMessage = "Empty upload stream"
-                };
-            }
-
-            var firstMessage = requestStream.Current;
-            if (firstMessage.MessageCase != UploadMessage.MessageOneofCase.Request)
-            {
-                return new UploadResult
-                {
-                    Success = false,
-                    ErrorMessage = "First message must be UploadRequest"
-                };
-            }
-
-            var uploadRequest = firstMessage.Request;
-            objectId = uploadRequest.ObjectId;
+            objectId = request.ObjectId;
 
             // Validate objectId
             if (string.IsNullOrWhiteSpace(objectId))
@@ -86,7 +64,7 @@ public class FileVaultNodeService : FileVaultNode.FileVaultNodeBase
             }
 
             // Validate createdAtUtc
-            if (string.IsNullOrWhiteSpace(uploadRequest.CreatedAtUtc))
+            if (string.IsNullOrWhiteSpace(request.CreatedAtUtc))
             {
                 return new UploadResult
                 {
@@ -96,7 +74,7 @@ public class FileVaultNodeService : FileVaultNode.FileVaultNodeBase
             }
 
             if (!DateTime.TryParseExact(
-                uploadRequest.CreatedAtUtc,
+                request.CreatedAtUtc,
                 "yyyy-MM-ddTHH:mm:ss.fffffffZ",
                 CultureInfo.InvariantCulture,
                 DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
@@ -110,55 +88,24 @@ public class FileVaultNodeService : FileVaultNode.FileVaultNodeBase
             }
 
             _logger.LogInformation(
-                "Starting upload for objectId: {ObjectId}, contentType: {ContentType}, originalFilename: {OriginalFilename}",
-                objectId, uploadRequest.ContentType, uploadRequest.OriginalFilename);
+                "Starting upload for objectId: {ObjectId}, contentType: {ContentType}, originalFilename: {OriginalFilename}, size: {Size}",
+                objectId, request.ContentType, request.OriginalFilename, request.Data.Length);
 
             // Acquire per-object lock
-            lockKey = _pathBuilder.GetLockKey(objectId);
+            var lockKey = _pathBuilder.GetLockKey(objectId);
             keyLock = await _keyedLock.LockAsync(lockKey, context.CancellationToken);
 
             // Get temp path
             tempPath = _pathBuilder.GetTempPath(objectId);
 
-            // Write to temp file with incremental checksum
-            long totalBytes = 0;
-            using var sha256 = SHA256.Create();
-            using var cryptoStream = new CryptoStream(Stream.Null, sha256, CryptoStreamMode.Write);
+            // Get data from request
+            var data = request.Data.ToByteArray();
 
-            await using (var tempFileStream = new FileStream(
-                tempPath,
-                FileMode.Create,
-                FileAccess.Write,
-                FileShare.None,
-                bufferSize: 81920,
-                useAsync: true))
-            {
-                // Process remaining chunks
-                while (await requestStream.MoveNext(context.CancellationToken))
-                {
-                    var message = requestStream.Current;
-                    if (message.MessageCase != UploadMessage.MessageOneofCase.Chunk)
-                    {
-                        throw new RpcException(new Status(
-                            StatusCode.InvalidArgument,
-                            "Expected ChunkData after UploadRequest"));
-                    }
+            // Compute checksum
+            var checksum = Convert.ToHexString(SHA256.HashData(data)).ToLowerInvariant();
 
-                    var chunkData = message.Chunk.Data.ToByteArray();
-                    if (chunkData.Length > 0)
-                    {
-                        await tempFileStream.WriteAsync(chunkData, context.CancellationToken);
-                        await cryptoStream.WriteAsync(chunkData, context.CancellationToken);
-                        totalBytes += chunkData.Length;
-                    }
-                }
-
-                await tempFileStream.FlushAsync(context.CancellationToken);
-            }
-
-            // Finalize hash
-            cryptoStream.FlushFinalBlock();
-            var checksum = Convert.ToHexString(sha256.Hash!).ToLowerInvariant();
+            // Write to temp file
+            await File.WriteAllBytesAsync(tempPath, data, context.CancellationToken);
 
             // Get final path
             var finalPath = _pathBuilder.GetFinalPath(objectId);
@@ -182,13 +129,13 @@ public class FileVaultNodeService : FileVaultNode.FileVaultNodeBase
 
             _logger.LogInformation(
                 "Upload completed for objectId: {ObjectId}, path: {Path}, size: {Size}, checksum: {Checksum}",
-                objectId, relativePath, totalBytes, checksum);
+                objectId, relativePath, data.Length, checksum);
 
             return new UploadResult
             {
                 Success = true,
                 FinalPath = relativePath,
-                SizeBytes = totalBytes,
+                SizeBytes = data.Length,
                 Checksum = checksum
             };
         }

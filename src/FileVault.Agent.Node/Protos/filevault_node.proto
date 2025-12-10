@@ -5,32 +5,24 @@ package filevault.node.v1;
 option csharp_namespace = "FileVault.Agent.Node.Protos";
 
 service FileVaultNode {
-  rpc Upload(stream UploadMessage) returns (UploadResult);
+  rpc Upload(UploadRequest) returns (UploadResult);
   rpc Download(DownloadRequest) returns (stream ChunkData);
   rpc Delete(DeleteRequest) returns (DeleteResult);
   rpc GetHealth(HealthRequest) returns (NodeStatus);
 }
 
-// First message in Upload stream
+// Simple upload request with all data
 message UploadRequest {
   string objectId = 1;
   string createdAtUtc = 2;       // ISO-8601: "yyyy-MM-ddTHH:mm:ss.fffffffZ"
   string contentType = 3;         // optional
   string originalFilename = 4;    // optional
-  int64 expectedSizeBytes = 5;    // optional
+  bytes data = 5;                 // File data
 }
 
-// Subsequent messages in Upload stream
+// Chunk for download streaming
 message ChunkData {
   bytes data = 1;
-}
-
-// Wrapper for streaming upload
-message UploadMessage {
-  oneof message {
-    UploadRequest request = 1;
-    ChunkData chunk = 2;
-  }
 }
 
 message DownloadRequest {
