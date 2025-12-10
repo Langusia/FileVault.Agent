@@ -7,7 +7,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Protobuf Include="Protos\filevault_node.proto" GrpcServices="Server" />
+    <Protobuf Include="Protos\filevault_node.proto" GrpcServices="Both" />
   </ItemGroup>
 
   <ItemGroup>

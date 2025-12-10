@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using FileVault.Agent.Node.Protos;
+using Grpc.Core;
 using Grpc.Net.Client;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Xunit;
