@@ -1,7 +1,10 @@
+using System.Buffers;
 using FileVault.Agent.Node.Protos;
+using FileVault.Test.Api.Configuration;
 using FileVault.Test.Api.Models;
 using Grpc.Core;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
 
 namespace FileVault.Test.Api.Controllers;
 
@@ -11,91 +14,149 @@ public class StorageController : ControllerBase
 {
     private readonly FileVaultNode.FileVaultNodeClient _grpcClient;
     private readonly ILogger<StorageController> _logger;
+    private readonly UploadOptions _uploadOptions;
 
     public StorageController(
         FileVaultNode.FileVaultNodeClient grpcClient,
-        ILogger<StorageController> logger)
+        ILogger<StorageController> logger,
+        IOptions<UploadOptions> uploadOptions)
     {
         _grpcClient = grpcClient;
         _logger = logger;
+        _uploadOptions = uploadOptions.Value;
     }
 
     /// <summary>
-    /// Upload a file to the storage node
+    /// Upload a file to the storage node using streaming
     /// </summary>
-    /// <param name="file">The file to upload</param>
     /// <param name="objectId">Optional object ID (auto-generated if not provided)</param>
     /// <returns>Upload result with checksum and final path</returns>
     [HttpPost("upload")]
     [ProducesResponseType(typeof(UploadResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [DisableRequestSizeLimit]
     public async Task<ActionResult<UploadResponse>> Upload(
-        IFormFile file,
-        [FromForm] string? objectId = null)
+        [FromQuery] string? objectId = null)
     {
+        byte[]? buffer = null;
+
         try
         {
-            if (file == null || file.Length == 0)
+            // Validate that we have a request body
+            if (Request.ContentLength == 0)
             {
                 return BadRequest(new UploadResponse
                 {
                     Success = false,
-                    ErrorMessage = "No file provided or file is empty"
+                    ErrorMessage = "Request body is empty"
                 });
             }
 
             // Generate objectId if not provided
             var uploadObjectId = string.IsNullOrWhiteSpace(objectId)
-                ? Guid.NewGuid().ToString()
+                ? Guid.NewGuid().ToString("N")
                 : objectId;
 
+            var createdAtUtc = DateTime.UtcNow;
+
             _logger.LogInformation(
-                "Uploading file: {FileName}, Size: {Size} bytes, ObjectId: {ObjectId}",
-                file.FileName, file.Length, uploadObjectId);
+                "Starting streaming upload for ObjectId: {ObjectId}, ContentLength: {ContentLength}",
+                uploadObjectId, Request.ContentLength ?? -1);
 
-            // Read file into memory
-            byte[] fileData;
-            using (var memoryStream = new MemoryStream())
+            // Open streaming gRPC call
+            var call = _grpcClient.Upload(cancellationToken: HttpContext.RequestAborted);
+
+            // Rent buffer from ArrayPool for efficient memory usage
+            var bufferSize = _uploadOptions.ChunkSizeBytes;
+            buffer = ArrayPool<byte>.Shared.Rent(bufferSize);
+
+            bool firstChunk = true;
+            long totalBytesRead = 0;
+
+            try
             {
-                await file.CopyToAsync(memoryStream);
-                fileData = memoryStream.ToArray();
-            }
+                int bytesRead;
+                while ((bytesRead = await Request.Body.ReadAsync(
+                    buffer.AsMemory(0, bufferSize),
+                    HttpContext.RequestAborted)) > 0)
+                {
+                    var chunk = new FileChunk
+                    {
+                        Data = Google.Protobuf.ByteString.CopyFrom(buffer, 0, bytesRead)
+                    };
 
-            // Call gRPC service
-            var grpcRequest = new UploadRequest
-            {
-                ObjectId = uploadObjectId,
-                CreatedAtUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ"),
-                ContentType = file.ContentType,
-                OriginalFilename = file.FileName,
-                Data = Google.Protobuf.ByteString.CopyFrom(fileData)
-            };
+                    // Include metadata in first chunk
+                    if (firstChunk)
+                    {
+                        chunk.ObjectId = uploadObjectId;
+                        chunk.CreatedAtUtc = createdAtUtc.ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ");
+                        firstChunk = false;
 
-            var result = await _grpcClient.UploadAsync(grpcRequest);
+                        _logger.LogDebug(
+                            "Sending first chunk with metadata: ObjectId={ObjectId}, Bytes={Bytes}",
+                            uploadObjectId, bytesRead);
+                    }
 
-            var response = new UploadResponse
-            {
-                Success = result.Success,
-                ErrorMessage = result.ErrorMessage,
-                FinalPath = result.FinalPath,
-                SizeBytes = result.SizeBytes,
-                Checksum = result.Checksum
-            };
+                    await call.RequestStream.WriteAsync(chunk);
+                    totalBytesRead += bytesRead;
+                }
 
-            if (result.Success)
-            {
+                // Handle case where no data was read (empty body)
+                if (firstChunk)
+                {
+                    // Send at least one chunk with metadata
+                    var emptyChunk = new FileChunk
+                    {
+                        ObjectId = uploadObjectId,
+                        CreatedAtUtc = createdAtUtc.ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ"),
+                        Data = Google.Protobuf.ByteString.Empty
+                    };
+                    await call.RequestStream.WriteAsync(emptyChunk);
+                }
+
+                // Complete the stream
+                await call.RequestStream.CompleteAsync();
+
                 _logger.LogInformation(
-                    "Upload successful: ObjectId={ObjectId}, Path={Path}, Checksum={Checksum}",
-                    uploadObjectId, result.FinalPath, result.Checksum);
-            }
-            else
-            {
-                _logger.LogWarning(
-                    "Upload failed: ObjectId={ObjectId}, Error={Error}",
-                    uploadObjectId, result.ErrorMessage);
-            }
+                    "Completed streaming {TotalBytes} bytes for ObjectId: {ObjectId}",
+                    totalBytesRead, uploadObjectId);
 
-            return Ok(response);
+                // Get result
+                var result = await call.ResponseAsync;
+
+                var response = new UploadResponse
+                {
+                    Success = result.Success,
+                    ErrorMessage = result.ErrorMessage,
+                    FinalPath = result.FinalPath,
+                    SizeBytes = result.SizeBytes,
+                    Checksum = result.Checksum
+                };
+
+                if (result.Success)
+                {
+                    _logger.LogInformation(
+                        "Upload successful: ObjectId={ObjectId}, Path={Path}, Size={Size}, Checksum={Checksum}",
+                        uploadObjectId, result.FinalPath, result.SizeBytes, result.Checksum);
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "Upload failed: ObjectId={ObjectId}, Error={Error}",
+                        uploadObjectId, result.ErrorMessage);
+                }
+
+                return result.Success ? Ok(response) : BadRequest(response);
+            }
+            finally
+            {
+                // Return buffer to pool
+                if (buffer != null)
+                {
+                    ArrayPool<byte>.Shared.Return(buffer);
+                    buffer = null;
+                }
+            }
         }
         catch (RpcException ex)
         {
@@ -114,6 +175,14 @@ public class StorageController : ControllerBase
                 Success = false,
                 ErrorMessage = $"Unexpected error: {ex.Message}"
             });
+        }
+        finally
+        {
+            // Ensure buffer is returned in case of exception
+            if (buffer != null)
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
         }
     }
 

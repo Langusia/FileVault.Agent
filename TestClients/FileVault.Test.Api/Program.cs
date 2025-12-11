@@ -1,7 +1,12 @@
 using FileVault.Agent.Node.Protos;
+using FileVault.Test.Api.Configuration;
 using Grpc.Net.Client;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Configure upload options
+builder.Services.Configure<UploadOptions>(
+    builder.Configuration.GetSection(UploadOptions.SectionName));
 
 // Add services to the container
 builder.Services.AddControllers();
@@ -74,35 +79,22 @@ public class SwaggerFileOperationFilter : Swashbuckle.AspNetCore.SwaggerGen.IOpe
         Microsoft.OpenApi.Models.OpenApiOperation operation,
         Swashbuckle.AspNetCore.SwaggerGen.OperationFilterContext context)
     {
-        var fileParams = context.MethodInfo.GetParameters()
-            .Where(p => p.ParameterType == typeof(IFormFile))
-            .ToList();
-
-        if (fileParams.Any())
+        // Check if this is the streaming upload endpoint
+        if (context.ApiDescription.RelativePath?.Contains("upload") == true &&
+            context.ApiDescription.HttpMethod?.Equals("POST", StringComparison.OrdinalIgnoreCase) == true)
         {
             operation.RequestBody = new Microsoft.OpenApi.Models.OpenApiRequestBody
             {
+                Required = true,
                 Content = new Dictionary<string, Microsoft.OpenApi.Models.OpenApiMediaType>
                 {
-                    ["multipart/form-data"] = new Microsoft.OpenApi.Models.OpenApiMediaType
+                    ["application/octet-stream"] = new Microsoft.OpenApi.Models.OpenApiMediaType
                     {
                         Schema = new Microsoft.OpenApi.Models.OpenApiSchema
                         {
-                            Type = "object",
-                            Properties = new Dictionary<string, Microsoft.OpenApi.Models.OpenApiSchema>
-                            {
-                                ["file"] = new Microsoft.OpenApi.Models.OpenApiSchema
-                                {
-                                    Type = "string",
-                                    Format = "binary"
-                                },
-                                ["objectId"] = new Microsoft.OpenApi.Models.OpenApiSchema
-                                {
-                                    Type = "string",
-                                    Description = "Optional custom object ID"
-                                }
-                            },
-                            Required = new HashSet<string> { "file" }
+                            Type = "string",
+                            Format = "binary",
+                            Description = "Raw file content (streamed)"
                         }
                     }
                 }
