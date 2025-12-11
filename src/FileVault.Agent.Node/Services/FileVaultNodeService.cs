@@ -39,19 +39,31 @@ public class FileVaultNodeService : FileVaultNode.FileVaultNodeBase
     }
 
     public override async Task<UploadResult> Upload(
-        UploadRequest request,
+        IAsyncStreamReader<FileChunk> requestStream,
         ServerCallContext context)
     {
         string? objectId = null;
         string? tempPath = null;
         IDisposable? keyLock = null;
+        FileStream? tempFileStream = null;
 
         try
         {
             // Wait for upload slot
             await _uploadLimiter.WaitAsync(context.CancellationToken);
 
-            objectId = request.ObjectId;
+            // Read the first chunk to get metadata
+            if (!await requestStream.MoveNext(context.CancellationToken))
+            {
+                return new UploadResult
+                {
+                    Success = false,
+                    ErrorMessage = "Stream contains no chunks"
+                };
+            }
+
+            var firstChunk = requestStream.Current;
+            objectId = firstChunk.ObjectId;
 
             // Validate objectId
             if (string.IsNullOrWhiteSpace(objectId))
@@ -59,22 +71,22 @@ public class FileVaultNodeService : FileVaultNode.FileVaultNodeBase
                 return new UploadResult
                 {
                     Success = false,
-                    ErrorMessage = "ObjectId is required"
+                    ErrorMessage = "ObjectId is required in first chunk"
                 };
             }
 
             // Validate createdAtUtc
-            if (string.IsNullOrWhiteSpace(request.CreatedAtUtc))
+            if (string.IsNullOrWhiteSpace(firstChunk.CreatedAtUtc))
             {
                 return new UploadResult
                 {
                     Success = false,
-                    ErrorMessage = "CreatedAtUtc is required"
+                    ErrorMessage = "CreatedAtUtc is required in first chunk"
                 };
             }
 
             if (!DateTime.TryParseExact(
-                request.CreatedAtUtc,
+                firstChunk.CreatedAtUtc,
                 "yyyy-MM-ddTHH:mm:ss.fffffffZ",
                 CultureInfo.InvariantCulture,
                 DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
@@ -88,8 +100,8 @@ public class FileVaultNodeService : FileVaultNode.FileVaultNodeBase
             }
 
             _logger.LogInformation(
-                "Starting upload for objectId: {ObjectId}, contentType: {ContentType}, originalFilename: {OriginalFilename}, size: {Size}",
-                objectId, request.ContentType, request.OriginalFilename, request.Data.Length);
+                "Starting streaming upload for objectId: {ObjectId}",
+                objectId);
 
             // Acquire per-object lock
             var lockKey = _pathBuilder.GetLockKey(objectId);
@@ -98,14 +110,59 @@ public class FileVaultNodeService : FileVaultNode.FileVaultNodeBase
             // Get temp path
             tempPath = _pathBuilder.GetTempPath(objectId);
 
-            // Get data from request
-            var data = request.Data.ToByteArray();
+            // Ensure temp directory exists
+            var tempDir = Path.GetDirectoryName(tempPath);
+            if (!string.IsNullOrEmpty(tempDir) && !Directory.Exists(tempDir))
+            {
+                Directory.CreateDirectory(tempDir);
+            }
 
-            // Compute checksum
-            var checksum = Convert.ToHexString(SHA256.HashData(data)).ToLowerInvariant();
+            // Open temp file for writing
+            tempFileStream = new FileStream(
+                tempPath,
+                FileMode.Create,
+                FileAccess.Write,
+                FileShare.None,
+                bufferSize: 81920, // 80KB buffer
+                useAsync: true);
 
-            // Write to temp file
-            await File.WriteAllBytesAsync(tempPath, data, context.CancellationToken);
+            // Initialize SHA-256 for incremental hashing
+            using var sha256 = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            long totalBytes = 0;
+
+            // Process first chunk data if not empty
+            if (firstChunk.Data != null && firstChunk.Data.Length > 0)
+            {
+                var chunkData = firstChunk.Data.ToByteArray();
+                await tempFileStream.WriteAsync(chunkData, context.CancellationToken);
+                sha256.AppendData(chunkData);
+                totalBytes += chunkData.Length;
+            }
+
+            // Stream remaining chunks
+            while (await requestStream.MoveNext(context.CancellationToken))
+            {
+                var chunk = requestStream.Current;
+                if (chunk.Data != null && chunk.Data.Length > 0)
+                {
+                    var chunkData = chunk.Data.ToByteArray();
+                    await tempFileStream.WriteAsync(chunkData, context.CancellationToken);
+                    sha256.AppendData(chunkData);
+                    totalBytes += chunkData.Length;
+                }
+            }
+
+            // Finalize hash
+            var checksumBytes = sha256.GetHashAndReset();
+            var checksum = Convert.ToHexString(checksumBytes).ToLowerInvariant();
+
+            // Close temp file before moving
+            await tempFileStream.DisposeAsync();
+            tempFileStream = null;
+
+            _logger.LogInformation(
+                "Received {TotalBytes} bytes for objectId: {ObjectId}, checksum: {Checksum}",
+                totalBytes, objectId, checksum);
 
             // Get final path
             var finalPath = _pathBuilder.GetFinalPath(objectId);
@@ -129,13 +186,13 @@ public class FileVaultNodeService : FileVaultNode.FileVaultNodeBase
 
             _logger.LogInformation(
                 "Upload completed for objectId: {ObjectId}, path: {Path}, size: {Size}, checksum: {Checksum}",
-                objectId, relativePath, data.Length, checksum);
+                objectId, relativePath, totalBytes, checksum);
 
             return new UploadResult
             {
                 Success = true,
                 FinalPath = relativePath,
-                SizeBytes = data.Length,
+                SizeBytes = totalBytes,
                 Checksum = checksum
             };
         }
@@ -168,6 +225,19 @@ public class FileVaultNodeService : FileVaultNode.FileVaultNodeBase
         }
         finally
         {
+            // Close temp file stream if still open
+            if (tempFileStream != null)
+            {
+                try
+                {
+                    await tempFileStream.DisposeAsync();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to dispose temp file stream");
+                }
+            }
+
             // Clean up temp file if it still exists
             if (tempPath != null)
             {
