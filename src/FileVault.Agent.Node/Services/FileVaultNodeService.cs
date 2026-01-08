@@ -99,16 +99,31 @@ public class FileVaultNodeService : FileVaultNode.FileVaultNodeBase
                 };
             }
 
-            _logger.LogInformation(
-                "Starting streaming upload for objectId: {ObjectId}",
-                objectId);
+            // Extract and validate shardIndex (optional, only from first chunk)
+            int? shardIndex = null;
+            if (firstChunk.HasShardIndex)
+            {
+                shardIndex = firstChunk.ShardIndex;
+                if (shardIndex < 0 || shardIndex > 255)
+                {
+                    return new UploadResult
+                    {
+                        Success = false,
+                        ErrorMessage = "ShardIndex must be between 0 and 255 (inclusive)"
+                    };
+                }
+            }
 
-            // Acquire per-object lock
-            var lockKey = _pathBuilder.GetLockKey(objectId);
+            _logger.LogInformation(
+                "Starting streaming upload for objectId: {ObjectId}, shardIndex: {ShardIndex}",
+                objectId, shardIndex?.ToString() ?? "none");
+
+            // Acquire per-object lock (includes shardIndex for shard-specific locking)
+            var lockKey = _pathBuilder.GetLockKey(objectId, shardIndex);
             keyLock = await _keyedLock.LockAsync(lockKey, context.CancellationToken);
 
             // Get temp path
-            tempPath = _pathBuilder.GetTempPath(objectId);
+            tempPath = _pathBuilder.GetTempPath(objectId, shardIndex);
 
             // Ensure temp directory exists
             var tempDir = Path.GetDirectoryName(tempPath);
@@ -161,16 +176,26 @@ public class FileVaultNodeService : FileVaultNode.FileVaultNodeBase
             tempFileStream = null;
 
             _logger.LogInformation(
-                "Received {TotalBytes} bytes for objectId: {ObjectId}, checksum: {Checksum}",
-                totalBytes, objectId, checksum);
+                "Received {TotalBytes} bytes for objectId: {ObjectId}, shardIndex: {ShardIndex}, checksum: {Checksum}",
+                totalBytes, objectId, shardIndex?.ToString() ?? "none", checksum);
 
-            // Get final path
-            var finalPath = _pathBuilder.GetFinalPath(objectId);
+            // Get final path (includes shardIndex if provided)
+            var finalPath = _pathBuilder.GetFinalPath(objectId, shardIndex);
 
-            // Handle versioning if file exists
+            // Check if file already exists - fail with AlreadyExists (deterministic paths, no versioning)
             if (await _fileStorage.ExistsAsync(finalPath, context.CancellationToken))
             {
-                finalPath = GetVersionedPath(finalPath);
+                _logger.LogWarning(
+                    "File already exists for objectId: {ObjectId}, shardIndex: {ShardIndex}",
+                    objectId, shardIndex?.ToString() ?? "none");
+
+                return new UploadResult
+                {
+                    Success = false,
+                    ErrorMessage = shardIndex.HasValue
+                        ? $"Shard {shardIndex.Value} already exists for objectId {objectId}"
+                        : $"Object {objectId} already exists"
+                };
             }
 
             // Ensure directory exists
@@ -185,8 +210,8 @@ public class FileVaultNodeService : FileVaultNode.FileVaultNodeBase
             var relativePath = Path.GetRelativePath(_options.BasePath, finalPath);
 
             _logger.LogInformation(
-                "Upload completed for objectId: {ObjectId}, path: {Path}, size: {Size}, checksum: {Checksum}",
-                objectId, relativePath, totalBytes, checksum);
+                "Upload completed for objectId: {ObjectId}, shardIndex: {ShardIndex}, path: {Path}, size: {Size}, checksum: {Checksum}",
+                objectId, shardIndex?.ToString() ?? "none", relativePath, totalBytes, checksum);
 
             return new UploadResult
             {
@@ -270,6 +295,19 @@ public class FileVaultNodeService : FileVaultNode.FileVaultNodeBase
             // Wait for download slot
             await _downloadLimiter.WaitAsync(context.CancellationToken);
 
+            // Extract and validate shardIndex (optional)
+            int? shardIndex = null;
+            if (request.HasShardIndex)
+            {
+                shardIndex = request.ShardIndex;
+                if (shardIndex < 0 || shardIndex > 255)
+                {
+                    throw new RpcException(new Status(
+                        StatusCode.InvalidArgument,
+                        "ShardIndex must be between 0 and 255 (inclusive)"));
+                }
+            }
+
             // Determine final path
             string finalPath;
             if (!string.IsNullOrWhiteSpace(request.FinalPath))
@@ -278,7 +316,7 @@ public class FileVaultNodeService : FileVaultNode.FileVaultNodeBase
             }
             else if (!string.IsNullOrWhiteSpace(objectId))
             {
-                finalPath = _pathBuilder.GetFinalPath(objectId);
+                finalPath = _pathBuilder.GetFinalPath(objectId, shardIndex);
             }
             else
             {
@@ -290,11 +328,13 @@ public class FileVaultNodeService : FileVaultNode.FileVaultNodeBase
             // Check if file exists
             if (!await _fileStorage.ExistsAsync(finalPath, context.CancellationToken))
             {
-                _logger.LogWarning("File not found for download: {FinalPath}", finalPath);
+                _logger.LogWarning("File not found for download: {FinalPath}, shardIndex: {ShardIndex}",
+                    finalPath, shardIndex?.ToString() ?? "none");
                 throw new RpcException(new Status(StatusCode.NotFound, "File not found"));
             }
 
-            _logger.LogInformation("Starting download for objectId: {ObjectId}, path: {Path}", objectId, finalPath);
+            _logger.LogInformation("Starting download for objectId: {ObjectId}, shardIndex: {ShardIndex}, path: {Path}",
+                objectId, shardIndex?.ToString() ?? "none", finalPath);
 
             // Stream file in chunks
             await using var fileStream = await _fileStorage.ReadAsync(finalPath, context.CancellationToken);
@@ -313,7 +353,8 @@ public class FileVaultNodeService : FileVaultNode.FileVaultNodeBase
                 totalBytes += bytesRead;
             }
 
-            _logger.LogInformation("Download completed for objectId: {ObjectId}, bytes sent: {TotalBytes}", objectId, totalBytes);
+            _logger.LogInformation("Download completed for objectId: {ObjectId}, shardIndex: {ShardIndex}, bytes sent: {TotalBytes}",
+                objectId, shardIndex?.ToString() ?? "none", totalBytes);
         }
         catch (OperationCanceledException)
         {
@@ -346,6 +387,19 @@ public class FileVaultNodeService : FileVaultNode.FileVaultNodeBase
 
         try
         {
+            // Extract and validate shardIndex (optional)
+            int? shardIndex = null;
+            if (request.HasShardIndex)
+            {
+                shardIndex = request.ShardIndex;
+                if (shardIndex < 0 || shardIndex > 255)
+                {
+                    throw new RpcException(new Status(
+                        StatusCode.InvalidArgument,
+                        "ShardIndex must be between 0 and 255 (inclusive)"));
+                }
+            }
+
             // Determine final path
             string finalPath;
             if (!string.IsNullOrWhiteSpace(request.FinalPath))
@@ -354,7 +408,7 @@ public class FileVaultNodeService : FileVaultNode.FileVaultNodeBase
             }
             else if (!string.IsNullOrWhiteSpace(objectId))
             {
-                finalPath = _pathBuilder.GetFinalPath(objectId);
+                finalPath = _pathBuilder.GetFinalPath(objectId, shardIndex);
             }
             else
             {
@@ -363,17 +417,20 @@ public class FileVaultNodeService : FileVaultNode.FileVaultNodeBase
                     "Either ObjectId or FinalPath must be provided"));
             }
 
-            _logger.LogInformation("Deleting file for objectId: {ObjectId}, path: {Path}", objectId, finalPath);
+            _logger.LogInformation("Deleting file for objectId: {ObjectId}, shardIndex: {ShardIndex}, path: {Path}",
+                objectId, shardIndex?.ToString() ?? "none", finalPath);
 
             var deleted = await _fileStorage.DeleteAsync(finalPath, context.CancellationToken);
 
             if (deleted)
             {
-                _logger.LogInformation("Successfully deleted file for objectId: {ObjectId}", objectId);
+                _logger.LogInformation("Successfully deleted file for objectId: {ObjectId}, shardIndex: {ShardIndex}",
+                    objectId, shardIndex?.ToString() ?? "none");
             }
             else
             {
-                _logger.LogInformation("File not found for deletion, objectId: {ObjectId}", objectId);
+                _logger.LogInformation("File not found for deletion, objectId: {ObjectId}, shardIndex: {ShardIndex}",
+                    objectId, shardIndex?.ToString() ?? "none");
             }
 
             return new DeleteResult { Deleted = deleted };
@@ -419,27 +476,4 @@ public class FileVaultNodeService : FileVaultNode.FileVaultNodeBase
         }
     }
 
-    /// <summary>
-    /// Gets a versioned path if the original path already exists
-    /// </summary>
-    private string GetVersionedPath(string originalPath)
-    {
-        if (!File.Exists(originalPath))
-            return originalPath;
-
-        var directory = Path.GetDirectoryName(originalPath) ?? string.Empty;
-        var filename = Path.GetFileNameWithoutExtension(originalPath);
-        var extension = Path.GetExtension(originalPath);
-
-        int version = 1;
-        string versionedPath;
-        do
-        {
-            versionedPath = Path.Combine(directory, $"{filename}_{version}{extension}");
-            version++;
-        } while (File.Exists(versionedPath));
-
-        _logger.LogInformation("File exists, using versioned path: {VersionedPath}", versionedPath);
-        return versionedPath;
-    }
 }

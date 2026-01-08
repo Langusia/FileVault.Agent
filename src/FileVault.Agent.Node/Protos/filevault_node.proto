@@ -16,6 +16,7 @@ message FileChunk {
   string objectId = 1;            // REQUIRED in first chunk, optional in subsequent chunks
   string createdAtUtc = 2;        // REQUIRED in first chunk, ISO-8601 format, optional in subsequent chunks
   bytes data = 3;                 // Chunk of file data, may be empty in first chunk
+  optional int32 shardIndex = 4;  // OPTIONAL: if provided in first chunk, stores shard instead of whole object (range: 0-255)
 }
 
 // Chunk for download streaming
@@ -25,12 +26,14 @@ message ChunkData {
 
 message DownloadRequest {
   string objectId = 1;
-  string finalPath = 2;  // optional, if not provided compute from objectId
+  string finalPath = 2;           // optional, if not provided compute from objectId
+  optional int32 shardIndex = 3;  // OPTIONAL: if provided, downloads shard instead of whole object (range: 0-255)
 }
 
 message DeleteRequest {
   string objectId = 1;
-  string finalPath = 2;  // optional, if not provided compute from objectId
+  string finalPath = 2;           // optional, if not provided compute from objectId
+  optional int32 shardIndex = 3;  // OPTIONAL: if provided, deletes shard instead of whole object (range: 0-255)
 }
 
 message UploadResult {
