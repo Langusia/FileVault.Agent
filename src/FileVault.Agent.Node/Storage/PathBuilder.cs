@@ -20,40 +20,68 @@ public class PathBuilder : IPathBuilder
         _tempDirectory = Path.Combine(_options.BasePath, _options.TempDirName);
     }
 
-    public string GetFinalPath(string objectId)
+    public string GetFinalPath(string objectId, int? shardIndex = null)
     {
         if (string.IsNullOrWhiteSpace(objectId))
             throw new ArgumentException("ObjectId cannot be null or whitespace", nameof(objectId));
+
+        ValidateShardIndex(shardIndex);
 
         var shardPath = ComputeShardPath(objectId);
-        return Path.Combine(_options.BasePath, shardPath, objectId);
+        var basePath = Path.Combine(_options.BasePath, shardPath, objectId);
+
+        // If shardIndex is provided, store in shards subdirectory
+        if (shardIndex.HasValue)
+        {
+            return Path.Combine(basePath, "shards", shardIndex.Value.ToString());
+        }
+
+        return basePath;
     }
 
-    public string GetTempPath(string objectId)
+    public string GetTempPath(string objectId, int? shardIndex = null)
     {
         if (string.IsNullOrWhiteSpace(objectId))
             throw new ArgumentException("ObjectId cannot be null or whitespace", nameof(objectId));
 
+        ValidateShardIndex(shardIndex);
+
         var timestamp = DateTime.UtcNow.Ticks;
-        var tempFileName = $"{objectId}_{timestamp}.uploading";
+        var tempFileName = shardIndex.HasValue
+            ? $"{objectId}.p{shardIndex.Value}_{timestamp}.uploading"
+            : $"{objectId}_{timestamp}.uploading";
+
         return Path.Combine(_tempDirectory, tempFileName);
     }
 
-    public string GetLockKey(string objectId)
+    public string GetLockKey(string objectId, int? shardIndex = null)
     {
         if (string.IsNullOrWhiteSpace(objectId))
             throw new ArgumentException("ObjectId cannot be null or whitespace", nameof(objectId));
 
-        return objectId;
+        ValidateShardIndex(shardIndex);
+
+        // Include shardIndex in lock key to allow concurrent uploads of different shards
+        return shardIndex.HasValue ? $"{objectId}:{shardIndex.Value}" : objectId;
     }
 
-    public string GetRelativePath(string objectId)
+    public string GetRelativePath(string objectId, int? shardIndex = null)
     {
         if (string.IsNullOrWhiteSpace(objectId))
             throw new ArgumentException("ObjectId cannot be null or whitespace", nameof(objectId));
 
+        ValidateShardIndex(shardIndex);
+
         var shardPath = ComputeShardPath(objectId);
-        return Path.Combine(shardPath, objectId);
+        var basePath = Path.Combine(shardPath, objectId);
+
+        // If shardIndex is provided, include shards subdirectory
+        if (shardIndex.HasValue)
+        {
+            return Path.Combine(basePath, "shards", shardIndex.Value.ToString());
+        }
+
+        return basePath;
     }
 
     /// <summary>
@@ -81,5 +109,17 @@ public class PathBuilder : IPathBuilder
 
         // Combine shard parts into path
         return Path.Combine(shardParts.ToArray());
+    }
+
+    /// <summary>
+    /// Validates that shardIndex is within the valid range (0-255)
+    /// </summary>
+    private static void ValidateShardIndex(int? shardIndex)
+    {
+        if (shardIndex.HasValue && (shardIndex.Value < 0 || shardIndex.Value > 255))
+        {
+            throw new ArgumentOutOfRangeException(nameof(shardIndex),
+                "ShardIndex must be between 0 and 255 (inclusive)");
+        }
     }
 }
